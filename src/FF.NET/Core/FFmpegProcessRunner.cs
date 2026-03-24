@@ -24,17 +24,25 @@ public class FFmpegProcessRunner : IFFmpegRunner
                                                     TimeSpan? knownDuration = null,
                                                     CancellationToken cancellationToken = default)
     {
-        string ffmpegPath = await GetFFmpegPathAsync(options, cancellationToken).ConfigureAwait(false);
-        return await RunProcessAsync(ffmpegPath, arguments, options, progress, knownDuration, cancellationToken).ConfigureAwait(false);
+        string ffmpegPath = await GetFFmpegPathAsync(options, cancellationToken);
+
+        // Automatically enable structured progress if caller wants progress
+        var argsList = new List<string>(arguments);
+        if (progress != null && !argsList.Contains("-progress"))
+        {
+            argsList.Insert(0, "-progress");
+            argsList.Insert(1, "pipe:1");
+        }
+
+        return await RunProcessAsync(ffmpegPath, argsList.ToArray(), options, progress, knownDuration, cancellationToken);
     }
 
     public async Task<ProcessResult> RunFFprobeAsync(string[] arguments,
                                                      FFmpegOptions options,
-                                                     TimeSpan? knownDuration = null,
                                                      CancellationToken cancellationToken = default)
     {
-        string ffprobePath = await GetFFprobePathAsync(options, cancellationToken).ConfigureAwait(false);
-        return await RunProcessAsync(ffprobePath, arguments, options, progress: null, knownDuration, cancellationToken).ConfigureAwait(false);
+        string ffprobePath = await GetFFprobePathAsync(options, cancellationToken);
+        return await RunProcessAsync(ffprobePath, arguments, options, null, null, cancellationToken);
     }
 
     private async Task<string> GetFFmpegPathAsync(FFmpegOptions options, CancellationToken ct)
@@ -42,11 +50,8 @@ public class FFmpegProcessRunner : IFFmpegRunner
         if (!string.IsNullOrWhiteSpace(options.FFmpegPath) && File.Exists(options.FFmpegPath))
             return options.FFmpegPath;
 
-        string? path = await _binaryLocator.LocateFFmpegAsync(ct).ConfigureAwait(false);
-        if (path is null)
-            throw new FileNotFoundException("ffmpeg executable could not be found. Please specify FFmpegPath in options or install ffmpeg.");
-
-        return path;
+        var path = await _binaryLocator.LocateFFmpegAsync(ct);
+        return path ?? throw new FileNotFoundException("ffmpeg executable not found. Please set FFmpegPath or install FFmpeg.");
     }
 
     private async Task<string> GetFFprobePathAsync(FFmpegOptions options, CancellationToken ct)
@@ -54,22 +59,18 @@ public class FFmpegProcessRunner : IFFmpegRunner
         if (!string.IsNullOrWhiteSpace(options.FFprobePath) && File.Exists(options.FFprobePath))
             return options.FFprobePath;
 
-        string? path = await _binaryLocator.LocateFFprobeAsync(ct).ConfigureAwait(false);
-        if (path is null)
-            throw new FileNotFoundException("ffprobe executable could not be found.");
-
-        return path;
+        var path = await _binaryLocator.LocateFFprobeAsync(ct);
+        return path ?? throw new FileNotFoundException("ffprobe executable not found.");
     }
 
     private async Task<ProcessResult> RunProcessAsync(string executable,
                                                       string[] args,
                                                       FFmpegOptions options,
                                                       IProgress<FFmpegProgress>? progress,
-                                                      TimeSpan? knownDuration = null,
-                                                      CancellationToken ct = default)
+                                                      TimeSpan? knownDuration,
+                                                      CancellationToken ct)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-
         if (options.DefaultTimeout > TimeSpan.Zero)
             cts.CancelAfter(options.DefaultTimeout);
 
@@ -82,16 +83,17 @@ public class FFmpegProcessRunner : IFFmpegRunner
             UseShellExecute = false,
             CreateNoWindow = options.CreateNoWindow,
             StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8
         };
 
-        options.Logger?.LogDebug("Executing: {Executable} {Arguments}", executable, psi.Arguments);
+        options.Logger?.LogDebug("Executing: {Executable} {Args}", executable, psi.Arguments);
 
-        using var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
-        var stdOutBuilder = new StringBuilder(16 * 1024);
-        var stdErrBuilder = new StringBuilder(64 * 1024);
+        using var process = new Process { StartInfo = psi };
 
-        var progressParser = new ProgressParser(totalDuration: knownDuration, progress: progress);
+        var stdOutBuilder = new StringBuilder(32 * 1024);
+        var stdErrBuilder = new StringBuilder(128 * 1024);
+
+        var progressParser = new ProgressParser(knownDuration, progress);
 
         var startTime = DateTime.UtcNow;
 
@@ -99,63 +101,49 @@ public class FFmpegProcessRunner : IFFmpegRunner
         {
             process.Start();
 
-            var stdErrReader = Task.Run(async () =>
-            {
-                using var reader = process.StandardError;
-                var buffer = new char[1024];
-                var sb = new StringBuilder();
-
-                while (true)
-                {
-                    if (ct.IsCancellationRequested)
-                        break;
-
-                    int read = await reader.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
-                    if (read == 0)
-                        break; // EOF
-
-                    sb.Append(buffer, 0, read);
-
-                    // split on \r or \n
-                    string data = sb.ToString();
-                    string[] lines = data.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-
-                    // keep last incomplete line in buffer
-                    sb.Clear();
-                    if (!data.EndsWith("\n") && !data.EndsWith("\r") && lines.Length > 0)
-                    {
-                        sb.Append(lines[^1]);
-                        lines = lines[..^1];
-                    }
-
-                    foreach (var line in lines)
-                    {
-                        Console.WriteLine(line);              // for debugging
-                        progressParser.Feed(line + "\n");     // feed parser
-                    }
-                }
-
-                progressParser.Flush();
-            }, ct);
-
-            var stdOutReader = Task.Run(async () =>
+            // === CRITICAL: Read stdout for progress when -progress pipe:1 is used ===
+            var stdoutTask = Task.Run(async () =>
             {
                 using var reader = process.StandardOutput;
+                var buffer = new char[8192];
+                int bytesRead;
+
+                while ((bytesRead = await reader.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false)) > 0)
+                {
+                    string chunk = new string(buffer, 0, bytesRead);
+                    stdOutBuilder.Append(chunk);
+
+                    // Feed progress parser from stdout when -progress pipe:1 is active
+                    if (progress != null)
+                        progressParser.Feed(chunk);
+                }
+                if (progress != null)
+                    progressParser.Flush();
+            }, ct);
+
+            // Read stderr (for errors and normal logs)
+            var stderrTask = Task.Run(async () =>
+            {
+                using var reader = process.StandardError;
                 string? line;
                 while ((line = await reader.ReadLineAsync(ct).ConfigureAwait(false)) != null)
                 {
-                    stdOutBuilder.AppendLine(line);
-                    options.Logger?.LogTrace("[ffmpeg stdout] {Line}", line);
+                    stdErrBuilder.AppendLine(line);
+                    options.Logger?.LogTrace("[FFmpeg stderr] {Line}", line);
                 }
             }, ct);
 
-            await Task.WhenAll(process.WaitForExitAsync(cts.Token), stdErrReader, stdOutReader).ConfigureAwait(false);
+            await Task.WhenAll(stdoutTask, stderrTask, process.WaitForExitAsync(cts.Token));
 
-            return new ProcessResult(process.ExitCode, stdOutBuilder.ToString(), stdErrBuilder.ToString(), DateTime.UtcNow - startTime);
+            return new ProcessResult(
+                process.ExitCode,
+                stdOutBuilder.ToString(),
+                stdErrBuilder.ToString(),
+                DateTime.UtcNow - startTime);
         }
         catch (OperationCanceledException)
         {
-            try { process.Kill(true); } catch { /* ignore */ }
+            try { process.Kill(true); } catch { }
             throw new OperationCanceledException("FFmpeg process was cancelled or timed out.", ct);
         }
         finally

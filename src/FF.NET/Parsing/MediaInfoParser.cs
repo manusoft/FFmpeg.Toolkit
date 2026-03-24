@@ -9,8 +9,13 @@ namespace ManuHub.FF.NET.Parsing;
 /// </summary>
 public static class MediaInfoParser
 {
+    private static readonly JsonElement EmptyJsonObject = JsonDocument.Parse("{}").RootElement;
+
     public static MediaInfo Parse(string json)
     {
+        if (string.IsNullOrWhiteSpace(json))
+            return new MediaInfo();
+
         var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
@@ -19,14 +24,13 @@ public static class MediaInfoParser
         // Format
         if (root.TryGetProperty("format", out var formatElem))
         {
-            var fmt = formatElem;
             info.Format = new FormatInfo
             {
-                FormatName = fmt.GetPropertyOrDefault("format_name", ""),
-                FormatLongName = fmt.GetPropertyOrDefault("format_long_name", ""),
-                SizeInBytes = fmt.GetPropertyOrDefault("size", 0L),
-                BitRate = fmt.GetPropertyOrDefault("bit_rate", 0L),
-                Duration = TimeSpan.FromSeconds(fmt.GetPropertyOrDefault("duration", 0.0))
+                FormatName = formatElem.GetPropertyOrDefault("format_name", ""),
+                FormatLongName = formatElem.GetPropertyOrDefault("format_long_name", ""),
+                SizeInBytes = formatElem.GetPropertyOrDefault("size", 0L),
+                BitRate = formatElem.GetPropertyOrDefault("bit_rate", 0L),
+                Duration = TimeSpan.FromSeconds(formatElem.GetPropertyOrDefault("duration", 0.0))
             };
         }
 
@@ -46,20 +50,16 @@ public static class MediaInfoParser
         {
             foreach (var ch in chaptersElem.EnumerateArray())
             {
-                // Chapter title
-                string chapterTitle = "";
-                if (ch.TryGetProperty("tags", out var tagsElem) &&
-                    tagsElem.TryGetProperty("title", out var titleElem))
-                {
-                    chapterTitle = titleElem.GetString() ?? "";
-                }
+                string title = "";
+                if (ch.TryGetProperty("tags", out var tags) && tags.TryGetProperty("title", out var titleElem))
+                    title = titleElem.GetString() ?? "";
 
                 info.Chapters.Add(new ChapterInfo
                 {
                     Id = ch.GetPropertyOrDefault("id", 0),
                     StartTime = TimeSpan.FromSeconds(ch.GetPropertyOrDefault("start_time", 0.0)),
                     EndTime = TimeSpan.FromSeconds(ch.GetPropertyOrDefault("end_time", 0.0)),
-                    Title = chapterTitle,
+                    Title = title
                 });
             }
         }
@@ -71,14 +71,14 @@ public static class MediaInfoParser
     {
         var codecType = elem.GetPropertyOrDefault("codec_type", "");
 
-        StreamInfo stream = codecType switch
+        StreamInfo? stream = codecType switch
         {
             "video" => new VideoStreamInfo
             {
                 Width = elem.GetPropertyOrDefault("width", 0),
                 Height = elem.GetPropertyOrDefault("height", 0),
                 PixelFormat = elem.GetPropertyOrDefault("pix_fmt", ""),
-                FrameRate = ParseFrameRate(elem.GetPropertyOrDefault("avg_frame_rate", elem.GetPropertyOrDefault("r_frame_rate", "0/1"))),
+                FrameRate = ParseFrameRate(elem.GetPropertyOrDefault("avg_frame_rate", "0/1")),
                 BitRate = elem.GetPropertyOrDefault("bit_rate", 0)
             },
             "audio" => new AudioStreamInfo
@@ -94,42 +94,39 @@ public static class MediaInfoParser
 
         if (stream == null) return null;
 
-        // IsDefault (disposition/default)
-        int isDefault = 0;
-        if (elem.TryGetProperty("disposition", out var dispElem) &&
-            dispElem.TryGetProperty("default", out var defElem))
-        {
-            isDefault = defElem.GetInt32();
-        }
-        stream.IsDefault = isDefault == 1;
-
-        // Language
-        string language = "";
-        if (elem.TryGetProperty("tags", out var tagsElem2) &&
-            tagsElem2.TryGetProperty("language", out var langElem))
-        {
-            language = langElem.GetString() ?? "";
-        }
-        stream.Language = language;
-
+        // Common properties
         stream.Index = elem.GetPropertyOrDefault("index", 0);
         stream.CodecName = elem.GetPropertyOrDefault("codec_name", "");
         stream.CodecLongName = elem.GetPropertyOrDefault("codec_long_name", "");
         stream.CodecType = codecType;
         stream.Duration = TimeSpan.FromSeconds(elem.GetPropertyOrDefault("duration", 0.0));
+
+        // IsDefault
+        stream.IsDefault = elem.GetPropertyOrDefault("disposition", EmptyJsonObject)
+                              .GetPropertyOrDefault("default", 0) == 1;
+
+        // Language
+        stream.Language = elem.GetPropertyOrDefault("tags", EmptyJsonObject)
+                             .GetPropertyOrDefault("language", "");
+
         return stream;
     }
 
     private static double ParseFrameRate(string rateStr)
     {
         if (string.IsNullOrEmpty(rateStr) || !rateStr.Contains('/')) return 0;
+
         var parts = rateStr.Split('/');
         if (parts.Length != 2) return 0;
-        if (!double.TryParse(parts[0], out var num) || !double.TryParse(parts[1], out var den) || den == 0)
+
+        if (!double.TryParse(parts[0], out var num) ||
+            !double.TryParse(parts[1], out var den) || den == 0)
             return 0;
+
         return num / den;
     }
 
+    // Improved extension method
     private static T GetPropertyOrDefault<T>(this JsonElement elem, string property, T defaultValue)
     {
         if (!elem.TryGetProperty(property, out var prop))
@@ -138,45 +135,20 @@ public static class MediaInfoParser
         try
         {
             if (typeof(T) == typeof(string))
-            {
-                if (prop.ValueKind == JsonValueKind.String)
-                    return (T)(object)(prop.GetString() ?? "");
-                return (T)(object)prop.ToString();
-            }
+                return (T)(object)(prop.GetString() ?? "");
 
-            if (typeof(T) == typeof(int))
-            {
-                if (prop.ValueKind == JsonValueKind.Number)
-                    return (T)(object)prop.GetInt32();
+            if (typeof(T) == typeof(int) && prop.ValueKind == JsonValueKind.Number)
+                return (T)(object)prop.GetInt32();
 
-                if (prop.ValueKind == JsonValueKind.String &&
-                    int.TryParse(prop.GetString(), out var v))
-                    return (T)(object)v;
-            }
+            if (typeof(T) == typeof(long) && prop.ValueKind == JsonValueKind.Number)
+                return (T)(object)prop.GetInt64();
 
-            if (typeof(T) == typeof(long))
-            {
-                if (prop.ValueKind == JsonValueKind.Number)
-                    return (T)(object)prop.GetInt64();
-
-                if (prop.ValueKind == JsonValueKind.String &&
-                    long.TryParse(prop.GetString(), out var v))
-                    return (T)(object)v;
-            }
-
-            if (typeof(T) == typeof(double))
-            {
-                if (prop.ValueKind == JsonValueKind.Number)
-                    return (T)(object)prop.GetDouble();
-
-                if (prop.ValueKind == JsonValueKind.String &&
-                    double.TryParse(prop.GetString(), CultureInfo.InvariantCulture, out var v))
-                    return (T)(object)v;
-            }
+            if (typeof(T) == typeof(double) && prop.ValueKind == JsonValueKind.Number)
+                return (T)(object)prop.GetDouble();
         }
         catch
         {
-            // ignore
+            // ignore conversion errors
         }
 
         return defaultValue;

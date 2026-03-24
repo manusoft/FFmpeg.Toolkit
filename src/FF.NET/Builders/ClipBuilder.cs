@@ -22,11 +22,11 @@ public class ClipBuilder
     private TimeSpan? _start;
     private TimeSpan? _duration;
     private TimeSpan? _end;
-    private string? _outputFormat;           // optional forced extension/codec
-    private bool _accurateCut;               // use -ss before -i for frame-accurate but slower
+    private string? _outputFormat;
+    private bool _accurateCut;
     private bool _forceReencode;
     private MediaInfo? _probedInfo;
-    private IProgress<FFmpegProgress>? _progress;
+    private IProgress<FFmpegProgress>? _externalProgress;
     private FFmpegProgress? _lastProgress;
 
     public ClipBuilder(IFFmpegRunner runner, FFmpegOptions? options = null)
@@ -39,7 +39,6 @@ public class ClipBuilder
     // ───────────────────────────────────────────────
     // Input / Output
     // ───────────────────────────────────────────────
-
     public ClipBuilder From(string inputPath)
     {
         if (string.IsNullOrWhiteSpace(inputPath))
@@ -60,59 +59,38 @@ public class ClipBuilder
     }
 
     // ───────────────────────────────────────────────
-    // Trim / Clip parameters
+    // Trim parameters
     // ───────────────────────────────────────────────
-
-    /// <summary>
-    /// Start time (seek position). Can be combined with Duration or End.
-    /// </summary>
     public ClipBuilder Start(TimeSpan start)
     {
         _start = start >= TimeSpan.Zero ? start : null;
         return this;
     }
 
-    /// <summary>
-    /// Duration of the clip to extract.
-    /// </summary>
     public ClipBuilder Duration(TimeSpan length)
     {
         _duration = length > TimeSpan.Zero ? length : null;
         return this;
     }
 
-    /// <summary>
-    /// End time of the clip (alternative to Duration).
-    /// </summary>
     public ClipBuilder End(TimeSpan endTime)
     {
         _end = endTime > TimeSpan.Zero ? endTime : null;
         return this;
     }
 
-    /// <summary>
-    /// Use accurate (frame-level) seeking (slower, re-encodes).
-    /// Default: fast seeking (keyframe-based, usually preserves copy).
-    /// </summary>
     public ClipBuilder AccurateCut(bool accurate = true)
     {
         _accurateCut = accurate;
         return this;
     }
 
-    /// <summary>
-    /// Force re-encoding even when stream copy would be possible.
-    /// </summary>
     public ClipBuilder ForceReencode(bool force = true)
     {
         _forceReencode = force;
         return this;
     }
 
-    /// <summary>
-    /// Force output container/format (overrides extension-based detection).
-    /// Example: "mp4", "mkv", "webm", "aac", "mp3"
-    /// </summary>
     public ClipBuilder Format(string format)
     {
         _outputFormat = format?.TrimStart('.').ToLowerInvariant();
@@ -121,14 +99,13 @@ public class ClipBuilder
 
     public ClipBuilder WithProgress(IProgress<FFmpegProgress> progress)
     {
-        _progress = progress;
+        _externalProgress = progress;
         return this;
     }
 
     // ───────────────────────────────────────────────
     // Probe
     // ───────────────────────────────────────────────
-
     public async Task<MediaInfo> ProbeAsync(CancellationToken ct = default)
     {
         if (_probedInfo != null) return _probedInfo;
@@ -145,7 +122,6 @@ public class ClipBuilder
     // ───────────────────────────────────────────────
     // Execute
     // ───────────────────────────────────────────────
-
     public async Task<FFmpegResult> ExecuteAsync(CancellationToken ct = default)
     {
         if (_inputPath == null)
@@ -163,12 +139,6 @@ public class ClipBuilder
             await ProbeAsync(ct).ConfigureAwait(false);
         }
 
-        var totalDuration = _probedInfo!.Duration;
-        if (totalDuration <= TimeSpan.Zero)
-        {
-            _options.Logger?.LogWarning("Input duration unknown — progress % may be inaccurate");
-        }
-
         // Normalize end time
         if (_end.HasValue && !_duration.HasValue)
         {
@@ -179,31 +149,39 @@ public class ClipBuilder
         }
 
         if (_duration.HasValue && _duration.Value <= TimeSpan.Zero)
-            throw new ArgumentException("Duration must be positive");
+            throw new ArgumentException("Duration must be positive", nameof(_duration));
+
+        // Enable structured progress
+        _cmd.WithProgressUrl("pipe:1");
+        _cmd.WithNoStats(true);
 
         ConfigureClipCommand();
 
         var args = _cmd.Build();
+
+        _options.Logger?.LogDebug("Clip command: {Command}", _cmd.BuildAsString());
 
         var stopwatch = Stopwatch.StartNew();
         FFmpegProgress? finalProgress = null;
 
         var progressWrapper = new Progress<FFmpegProgress>(p =>
         {
+            _lastProgress = p;
             finalProgress = p;
-            _progress?.Report(p);
+            _externalProgress?.Report(p);
         });
 
-        var parser = new ProgressParser(_duration ?? totalDuration, progressWrapper);
+        // For progress calculation, use clip duration if known, otherwise full file duration
+        TimeSpan? progressDuration = _duration ?? _probedInfo?.Duration;
 
         try
         {
             var processResult = await _runner.RunFFmpegAsync(
-                args,
-                _options,
-                progressWrapper,
-                knownDuration: _duration,
-                ct);
+                arguments: args,
+                options: _options,
+                progress: progressWrapper,
+                knownDuration: progressDuration,
+                cancellationToken: ct);
 
             stopwatch.Stop();
 
@@ -229,7 +207,7 @@ public class ClipBuilder
 
         if (_accurateCut)
         {
-            // Accurate mode: -ss after -i → usually requires re-encoding
+            // Accurate seeking (after -i) → usually forces re-encode
             if (_start.HasValue)
                 _cmd.SeekOutput(_start.Value);
 
@@ -238,18 +216,14 @@ public class ClipBuilder
             else if (_end.HasValue)
                 _cmd.ToTime(_end.Value);
 
-            if (!canCopy)
-            {
-                ApplyReencodeDefaults();
-            }
-            else
-            {
+            if (canCopy)
                 _cmd.CopyAllStreams();
-            }
+            else
+                ApplyReencodeDefaults();
         }
         else
         {
-            // Fast mode: -ss before -i (keyframe seeking) + copy possible
+            // Fast seeking (before -i) → best chance for stream copy
             if (_start.HasValue)
                 _cmd.SeekInput(_start.Value);
 
@@ -261,12 +235,12 @@ public class ClipBuilder
             if (canCopy)
             {
                 _cmd.CopyAllStreams();
-                _options.Logger?.LogInformation("Clip: using fast seek + stream copy");
+                _options.Logger?.LogInformation("Clip: Fast seek + stream copy enabled");
             }
             else
             {
                 ApplyReencodeDefaults();
-                _options.Logger?.LogInformation("Clip: fast seek not possible → re-encoding");
+                _options.Logger?.LogInformation("Clip: Re-encoding required");
             }
         }
 
@@ -277,33 +251,28 @@ public class ClipBuilder
     {
         if (_probedInfo == null) return false;
 
-        var video = _probedInfo.VideoStream;
-        var audio = _probedInfo.AudioStream;
-
-        // For pure audio clip → almost always copy
-        if (video == null && audio != null)
+        // Pure audio clip → almost always safe to copy
+        if (_probedInfo.VideoStream == null && _probedInfo.AudioStream != null)
             return true;
 
-        // Video clip: copy only if we don't need precise cut or format change
+        // Accurate cut usually breaks stream copy
         if (_accurateCut) return false;
 
-        // Simple check — in real-world often more constraints (GOP, pixel format, etc.)
+        // For video: simple check (can be made stricter later)
         return true;
     }
 
     private void ApplyReencodeDefaults()
     {
-        // Safe re-encode defaults
         _cmd.VideoCodec("libx264");
         _cmd.Crf(23);
         _cmd.Preset("medium");
         _cmd.AudioCodec("aac");
         _cmd.AddArgument("-b:a", "192k");
 
-        // If output format forced
         if (_outputFormat != null)
         {
-            // could add -f {format} but usually extension is enough
+            // Extension usually determines container, but we can force if needed
         }
     }
 

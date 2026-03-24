@@ -11,13 +11,13 @@ public class FFmpegCommandBuilder
 
     private string? _inputFile;
     private string? _outputFile;
-    private readonly List<string> _customPreInputs = new();   // -ss before -i
-    private readonly List<string> _customPostInputs = new();  // after -i, before output
+    private readonly List<string> _customPreInputs = new();   // before -i (e.g. -ss)
+    private readonly List<string> _customPostInputs = new();  // after -i
     private readonly List<string> _filters = new();
-    private readonly List<string> _metadata = new();
+
     private bool _overwrite = true;
     private bool _hideBanner = true;
-    private bool _nostats = false;
+    private bool _nostats = true;
 
     public FFmpegCommandBuilder(FFmpegOptions? options = null)
     {
@@ -25,9 +25,8 @@ public class FFmpegCommandBuilder
     }
 
     // ───────────────────────────────────────────────
-    // Basic input / output
+    // Input / Output
     // ───────────────────────────────────────────────
-
     public FFmpegCommandBuilder Input(string inputPath)
     {
         if (string.IsNullOrWhiteSpace(inputPath))
@@ -53,32 +52,20 @@ public class FFmpegCommandBuilder
     }
 
     // ───────────────────────────────────────────────
-    // Common global flags
+    // Global Flags
     // ───────────────────────────────────────────────
-
-    public FFmpegCommandBuilder WithHideBanner(bool hide = true)
-    {
-        _hideBanner = hide;
-        return this;
-    }
-
-    public FFmpegCommandBuilder WithNoStats(bool noStats = true)
-    {
-        _nostats = noStats;
-        return this;
-    }
+    public FFmpegCommandBuilder WithHideBanner(bool hide = true) { _hideBanner = hide; return this; }
+    public FFmpegCommandBuilder WithNoStats(bool noStats = true) { _nostats = noStats; return this; }
 
     public FFmpegCommandBuilder WithProgressUrl(string progressUrl)
     {
-        // Example: "pipe:1" or "http://127.0.0.1:8080/progress"
         AddArgument("-progress", progressUrl);
         return this;
     }
 
     // ───────────────────────────────────────────────
-    // Seeking / trimming
+    // Seeking / Trimming
     // ───────────────────────────────────────────────
-
     public FFmpegCommandBuilder SeekInput(TimeSpan? start)
     {
         if (start.HasValue && start.Value >= TimeSpan.Zero)
@@ -86,7 +73,7 @@ public class FFmpegCommandBuilder
         return this;
     }
 
-    public FFmpegCommandBuilder SeekOutput(TimeSpan? start)
+    public FFmpegCommandBuilder SeekOutput(TimeSpan? start)   // ← Added back for ClipBuilder
     {
         if (start.HasValue && start.Value >= TimeSpan.Zero)
             AddArgument("-ss", start.Value.TotalSeconds.ToString("F3", CultureInfo.InvariantCulture));
@@ -108,57 +95,30 @@ public class FFmpegCommandBuilder
     }
 
     // ───────────────────────────────────────────────
-    // Codecs & quality
+    // Codecs & Quality
     // ───────────────────────────────────────────────
-
-    public FFmpegCommandBuilder VideoCodec(string codec)
-    {
-        AddArgument("-c:v", codec);
-        return this;
-    }
-
-    public FFmpegCommandBuilder AudioCodec(string codec)
-    {
-        AddArgument("-c:a", codec);
-        return this;
-    }
-
-    public FFmpegCommandBuilder CopyAllStreams()
-    {
-        AddArgument("-c", "copy");
-        return this;
-    }
-
-    public FFmpegCommandBuilder CopyVideo()
-    {
-        AddArgument("-c:v", "copy");
-        return this;
-    }
-
-    public FFmpegCommandBuilder CopyAudio()
-    {
-        AddArgument("-c:a", "copy");
-        return this;
-    }
+    public FFmpegCommandBuilder VideoCodec(string codec) { AddArgument("-c:v", codec); return this; }
+    public FFmpegCommandBuilder AudioCodec(string codec) { AddArgument("-c:a", codec); return this; }
+    public FFmpegCommandBuilder CopyAllStreams() { AddArgument("-c", "copy"); return this; }
+    public FFmpegCommandBuilder CopyVideo() { AddArgument("-c:v", "copy"); return this; }
+    public FFmpegCommandBuilder CopyAudio() { AddArgument("-c:a", "copy"); return this; }
 
     public FFmpegCommandBuilder Crf(int crf)
     {
-        if (crf < 0 || crf > 51) throw new ArgumentOutOfRangeException(nameof(crf), "CRF must be 0–51");
+        if (crf < 0 || crf > 51) throw new ArgumentOutOfRangeException(nameof(crf), "CRF must be between 0 and 51");
         AddArgument("-crf", crf.ToString(CultureInfo.InvariantCulture));
         return this;
     }
 
     public FFmpegCommandBuilder Preset(string preset)
     {
-        // ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow, placebo
         AddArgument("-preset", preset);
         return this;
     }
 
     // ───────────────────────────────────────────────
-    // Video filters (complex filtergraph support)
+    // Filters
     // ───────────────────────────────────────────────
-
     public FFmpegCommandBuilder AddVideoFilter(string filter)
     {
         if (!string.IsNullOrWhiteSpace(filter))
@@ -168,21 +128,20 @@ public class FFmpegCommandBuilder
 
     public FFmpegCommandBuilder Scale(int width, int? height = null, string flags = "lanczos")
     {
-        string h = height.HasValue ? height.Value.ToString(CultureInfo.InvariantCulture) : "-2"; // keep aspect
+        string h = height?.ToString(CultureInfo.InvariantCulture) ?? "-2";
         _filters.Add($"scale={width}:{h}:flags={flags}");
         return this;
     }
 
     public FFmpegCommandBuilder Fps(double fps)
     {
-        _filters.Add($"fps={fps.ToString("F3", CultureInfo.InvariantCulture)}");
+        _filters.Add($"fps={fps:F3}");
         return this;
     }
 
     // ───────────────────────────────────────────────
-    // Metadata / chapters / subtitles
+    // Metadata & Subtitles
     // ───────────────────────────────────────────────
-
     public FFmpegCommandBuilder Metadata(string key, string value)
     {
         AddArgument("-metadata", $"{EscapeMetadataKey(key)}={EscapeArgument(value)}");
@@ -194,15 +153,13 @@ public class FFmpegCommandBuilder
         var filter = $"subtitles={EscapeFilterArgument(subtitleFile)}";
         if (!string.IsNullOrEmpty(fontsDir))
             filter += $":fontsdir={EscapeFilterArgument(fontsDir)}";
-
         _filters.Add(filter);
         return this;
     }
 
     // ───────────────────────────────────────────────
-    // Custom / low-level additions
+    // Custom Arguments
     // ───────────────────────────────────────────────
-
     public FFmpegCommandBuilder AddArgument(string arg)
     {
         _arguments.Add(arg);
@@ -229,14 +186,12 @@ public class FFmpegCommandBuilder
     }
 
     // ───────────────────────────────────────────────
-    // Build final argument array
+    // Build
     // ───────────────────────────────────────────────
-
     public string[] Build()
     {
         var final = new List<string>();
 
-        // Global flags from options + builder overrides
         if (_hideBanner) final.Add("-hide_banner");
         if (_nostats) final.Add("-nostats");
         if (_overwrite) final.Add("-y");
@@ -251,20 +206,16 @@ public class FFmpegCommandBuilder
 
         final.AddRange(_customPostInputs);
 
-        // Filters
         if (_filters.Count > 0)
         {
             final.Add("-vf");
             final.Add(string.Join(",", _filters));
         }
 
-        // All other collected arguments
         final.AddRange(_arguments);
 
         if (_outputFile != null)
-        {
             final.Add(EscapeArgument(_outputFile));
-        }
 
         return final.ToArray();
     }
@@ -272,46 +223,28 @@ public class FFmpegCommandBuilder
     public string BuildAsString() => string.Join(" ", Build().Select(EscapeForDisplay));
 
     // ───────────────────────────────────────────────
-    // Escaping helpers
+    // Escaping Helpers
     // ───────────────────────────────────────────────
-
     private static string EscapeArgument(string value)
     {
         if (string.IsNullOrEmpty(value)) return value;
-
-        // Simple case - no special chars
         if (!value.Any(c => char.IsWhiteSpace(c) || c == '"' || c == '\'' || c == '\\'))
             return value;
 
-        // Windows / cross-platform safe quoting
         var sb = new StringBuilder();
         sb.Append('"');
-
         foreach (char c in value)
         {
-            if (c == '"')
-            {
-                sb.Append('\\');
-                sb.Append('"');
-            }
-            else if (c == '\\')
-            {
-                sb.Append('\\');
-                sb.Append('\\');
-            }
-            else
-            {
-                sb.Append(c);
-            }
+            if (c == '"') { sb.Append('\\'); sb.Append('"'); }
+            else if (c == '\\') { sb.Append('\\'); sb.Append('\\'); }
+            else sb.Append(c);
         }
-
         sb.Append('"');
         return sb.ToString();
     }
 
     private static string EscapeFilterArgument(string value)
     {
-        // For filter params like subtitles=filename : escape : , ' etc.
         return value
             .Replace(@"\", @"\\")
             .Replace("'", @"\'")
@@ -322,13 +255,11 @@ public class FFmpegCommandBuilder
 
     private static string EscapeMetadataKey(string key)
     {
-        // Very basic – real metadata keys usually don't need much escaping
         return key.Replace("\"", "\\\"");
     }
 
     private static string EscapeForDisplay(string arg)
     {
-        // For logging – show quotes only when really needed
         if (arg.Contains(' ') || arg.Contains('"') || arg.Contains('\''))
             return $"\"{arg}\"";
         return arg;

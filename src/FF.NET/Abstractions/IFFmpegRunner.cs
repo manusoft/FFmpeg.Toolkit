@@ -28,6 +28,5 @@ public interface IFFmpegRunner
     /// </summary>
     Task<ProcessResult> RunFFprobeAsync(string[] arguments,
                                         FFmpegOptions options,
-                                        TimeSpan? knownDuration = null,
                                         CancellationToken cancellationToken = default);
 }

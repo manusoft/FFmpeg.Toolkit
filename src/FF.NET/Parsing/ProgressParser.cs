@@ -15,22 +15,15 @@ public class ProgressParser : IProgressParser
     private readonly IProgress<FFmpegProgress>? _progressSink;
     private readonly object _lock = new();
 
-    /// <summary>
-    /// Creates a new progress parser.
-    /// </summary>
-    /// <param name="totalDuration">Optional: known total input duration (from ffprobe) to enable % and ETA calculation.</param>
-    /// <param name="progress">Where to push parsed progress updates.</param>
+    // Accumulator for the latest known good progress
+    private FFmpegProgress _current = new FFmpegProgress { Status = "continue" };
+
     public ProgressParser(TimeSpan? totalDuration = null, IProgress<FFmpegProgress>? progress = null)
     {
         _totalDuration = totalDuration;
         _progressSink = progress;
     }
 
-    /// <summary>
-    /// Feed a chunk of data received from stderr or progress pipe.
-    /// Call this from the line-reading loop.
-    /// </summary>
-    /// <param name="data">New chunk of text (can be partial line).</param>
     public void Feed(string data)
     {
         if (string.IsNullOrEmpty(data)) return;
@@ -39,170 +32,126 @@ public class ProgressParser : IProgressParser
         {
             _buffer.Append(data);
 
-            string bufferContent = _buffer.ToString();
+            string content = _buffer.ToString()
+                .Replace("\r\n", "\n")
+                .Replace("\r", "\n");
 
-            // Split on double newlines or explicit blank lines – common chunk separator
-            var chunks = bufferContent.Split(new[] { "\r\n\r\n", "\n\n" }, StringSplitOptions.RemoveEmptyEntries);
+            var lines = content.Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
-            for (int i = 0; i < chunks.Length - 1; i++)
+            for (int i = 0; i < lines.Length - 1; i++)
             {
-                ParseChunk(chunks[i].Trim());
+                ParseMessyLine(lines[i]);
             }
 
-            // Keep the unfinished part
             _buffer.Clear();
-            _buffer.Append(chunks[^1]);
+            if (lines.Length > 0)
+                _buffer.Append(lines[^1]);
         }
     }
 
-    /// <summary>
-    /// Call when stream ends (eof) to flush any remaining data.
-    /// </summary>
     public void Flush()
     {
         lock (_lock)
         {
             if (_buffer.Length > 0)
-            {
-                ParseChunk(_buffer.ToString().Trim());
-                _buffer.Clear();
-            }
+                ParseMessyLine(_buffer.ToString());
         }
     }
 
-    private void ParseChunk(string chunk)
+    private void ParseMessyLine(string line)
     {
-        if (string.IsNullOrWhiteSpace(chunk)) return;
+        if (string.IsNullOrWhiteSpace(line)) return;
 
-        var lines = chunk.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-        var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var tokens = line.Split('=', StringSplitOptions.RemoveEmptyEntries);
 
-        foreach (var line in lines)
+        bool hasMeaningfulUpdate = false;
+
+        for (int i = 0; i < tokens.Length - 1; i += 2)
         {
-            var trimmed = line.Trim();
-            if (string.IsNullOrWhiteSpace(trimmed)) continue;
+            string key = tokens[i].Trim();
+            string value = tokens[i + 1].Trim();
 
-            int eqIndex = trimmed.IndexOf('=');
-            if (eqIndex < 0) continue;
+            if (string.IsNullOrEmpty(key)) continue;
 
-            string key = trimmed[..eqIndex].Trim();
-            string value = trimmed[(eqIndex + 1)..].Trim();
+            // Optional: remove this line after testing
+            Console.WriteLine($"[DEBUG] {key} = {value}");
 
-            dict[key] = value;
+            hasMeaningfulUpdate |= UpdateField(key, value);
         }
 
-        if (dict.Count == 0) return;
-
-        var progress = BuildProgress(dict);
-        if (progress != null)
+        // Only report when we have a good update (especially time or speed)
+        if (hasMeaningfulUpdate && _progressSink != null)
         {
-            _progressSink?.Report(progress);
+            _progressSink.Report(_current);
         }
     }
 
-    private FFmpegProgress? BuildProgress(IReadOnlyDictionary<string, string> dict)
+    private bool UpdateField(string key, string value)
     {
-        if (!dict.TryGetValue("progress", out var status) || string.IsNullOrWhiteSpace(status))
-            return null;
-
-        var builder = new FFmpegProgressBuilder
+        switch (key.ToLowerInvariant())
         {
-            Status = status.Trim()
-        };
-
-        if (dict.TryGetValue("frame", out var frameStr) && long.TryParse(frameStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out long frame))
-            builder.Frame = frame;
-
-        if (dict.TryGetValue("fps", out var fpsStr) && double.TryParse(fpsStr, NumberStyles.Any, CultureInfo.InvariantCulture, out double fps))
-            builder.Fps = fps;
-
-        if (dict.TryGetValue("bitrate", out var bitrate))
-            builder.Bitrate = bitrate.Trim();
-
-        if (dict.TryGetValue("speed", out var speed))
-            builder.Speed = speed.Trim();
-
-        // Prefer 'out_time' or 'time' – newer ffmpeg uses out_time
-        string? timeStr = null;
-        if (dict.TryGetValue("out_time", out timeStr) && !string.IsNullOrWhiteSpace(timeStr)) { }
-        else if (dict.TryGetValue("time", out timeStr)) { }
-
-        if (!string.IsNullOrWhiteSpace(timeStr) && TryParseFfmpegTime(timeStr, out var timeSpan))
-        {
-            builder.Time = timeSpan;
-
-            if (_totalDuration.HasValue && _totalDuration.Value > TimeSpan.Zero)
-            {
-                double percent = (timeSpan.TotalSeconds / _totalDuration.Value.TotalSeconds) * 100;
-                builder.PercentComplete = Math.Clamp(percent, 0, 100);
-
-                if (!string.IsNullOrWhiteSpace(builder.Speed) &&
-                    builder.Speed.EndsWith("x", StringComparison.OrdinalIgnoreCase) &&
-                    double.TryParse(builder.Speed[..^1], NumberStyles.Any, CultureInfo.InvariantCulture, out double speedX) &&
-                    speedX > 0.01)
+            case "frame":
+                if (long.TryParse(value, out long frame))
                 {
-                    double remainingSec = (_totalDuration.Value.TotalSeconds - timeSpan.TotalSeconds) / speedX;
-                    builder.Eta = TimeSpan.FromSeconds(Math.Max(0, remainingSec));
+                    _current = _current with { Frame = frame };
+                    return true;
                 }
-            }
-        }
+                break;
 
-        return builder.Build();
-    }
+            case "fps":
+                if (double.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out double fps))
+                {
+                    _current = _current with { Fps = fps };
+                    return true;
+                }
+                break;
 
-    private static bool TryParseFfmpegTime(string timeStr, out TimeSpan result)
-    {
-        result = default;
+            case "bitrate":
+                _current = _current with { Bitrate = value };
+                return true;
 
-        // Format: HH:MM:SS.mmmmmm or SS.mmmmmm or MM:SS.mmm
-        var parts = timeStr.Split(':');
-        if (parts.Length == 3 &&
-            int.TryParse(parts[0], out int h) &&
-            int.TryParse(parts[1], out int m) &&
-            double.TryParse(parts[2], NumberStyles.Any, CultureInfo.InvariantCulture, out double s))
-        {
-            result = TimeSpan.FromHours(h) + TimeSpan.FromMinutes(m) + TimeSpan.FromSeconds(s);
-            return true;
-        }
+            case "speed":
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    _current = _current with { Speed = value };
+                    return true;
+                }
+                break;
 
-        if (parts.Length == 2 &&
-            int.TryParse(parts[0], out int min) &&
-            double.TryParse(parts[1], NumberStyles.Any, CultureInfo.InvariantCulture, out double sec))
-        {
-            result = TimeSpan.FromMinutes(min) + TimeSpan.FromSeconds(sec);
-            return true;
-        }
+            case "out_time":
+            case "time":
+                if (TryParseFfmpegTime(value, out var timeSpan))
+                {
+                    _current = _current with { Time = timeSpan };
 
-        if (double.TryParse(timeStr, NumberStyles.Any, CultureInfo.InvariantCulture, out double totalSec))
-        {
-            result = TimeSpan.FromSeconds(totalSec);
-            return true;
+                    if (_totalDuration.HasValue && _totalDuration.Value > TimeSpan.Zero)
+                    {
+                        double percent = (timeSpan.TotalSeconds / _totalDuration.Value.TotalSeconds) * 100;
+                        _current = _current with { PercentComplete = Math.Clamp(percent, 0, 100) };
+                    }
+                    return true;
+                }
+                break;
+
+            case "progress":
+                _current = _current with { Status = value.Trim() };
+                return true;
         }
 
         return false;
     }
 
-    private struct FFmpegProgressBuilder
+    private static bool TryParseFfmpegTime(string timeStr, out TimeSpan result)
     {
-        public long? Frame { get; set; }   // ← change init → set
-        public double? Fps { get; set; }
-        public string? Bitrate { get; set; }
-        public string? Speed { get; set; }
-        public TimeSpan? Time { get; set; }
-        public double? PercentComplete { get; set; }
-        public TimeSpan? Eta { get; set; }
-        public string? Status { get; set; }
+        result = default;
+        if (TimeSpan.TryParse(timeStr, CultureInfo.InvariantCulture, out result))
+            return true;
 
-        public FFmpegProgress Build() => new()
+        if (double.TryParse(timeStr, NumberStyles.Any, CultureInfo.InvariantCulture, out double seconds))
         {
-            Frame = Frame,
-            Fps = Fps,
-            Bitrate = Bitrate,
-            Speed = Speed,
-            Time = Time,
-            PercentComplete = PercentComplete,
-            Eta = Eta,
-            Status = Status
-        };
+            result = TimeSpan.FromSeconds(seconds);
+            return true;
+        }
+        return false;
     }
 }

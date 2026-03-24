@@ -9,24 +9,26 @@ namespace ManuHub.FF.NET;
 /// Static facade / entry point for the FFmpeg.Toolkit library.
 /// Provides factory methods for all major builders with sensible defaults.
 /// </summary>
-public static class FFmpeg
+/// <summary>
+/// Main static entry point and facade for FFmpeg.Toolkit.
+/// Provides easy access to all builders with sensible defaults.
+/// </summary>
+public static class FFmpegToolkit
 {
     private static IFFmpegRunner? _defaultRunner;
     private static FFmpegOptions? _globalOptions;
 
     /// <summary>
-    /// Global/default options (can be overridden per call).
-    /// Set once at startup if needed.
+    /// Global default options. Can be configured once at application startup.
     /// </summary>
     public static FFmpegOptions GlobalOptions
     {
         get => _globalOptions ??= new FFmpegOptions();
-        set => _globalOptions = value;
+        set => _globalOptions = value?.Clone() ?? new FFmpegOptions();
     }
 
     /// <summary>
-    /// Default runner instance (lazy-created).
-    /// Uses DefaultBinaryLocator + optional logger.
+    /// Lazy-initialized default runner.
     /// </summary>
     public static IFFmpegRunner DefaultRunner
     {
@@ -35,7 +37,7 @@ public static class FFmpeg
             if (_defaultRunner == null)
             {
                 var locator = new DefaultBinaryLocator();
-                var logger = GetLogger<FFmpegProcessRunner>(); // optional – from DI or fallback
+                var logger = GetLogger<FFmpegProcessRunner>();
                 _defaultRunner = new FFmpegProcessRunner(locator, logger);
             }
             return _defaultRunner;
@@ -46,65 +48,45 @@ public static class FFmpeg
     // Builder Factories
     // ───────────────────────────────────────────────
 
+    public static ConvertBuilder Probe(IFFmpegRunner? runner = null, FFmpegOptions? options = null) => new(runner ?? DefaultRunner, options ?? GlobalOptions.Clone());
+
     public static ConvertBuilder Convert(IFFmpegRunner? runner = null, FFmpegOptions? options = null)
-    {
-        return new ConvertBuilder(runner ?? DefaultRunner, options ?? GlobalOptions.Clone());
-    }
+        => new(runner ?? DefaultRunner, options ?? GlobalOptions.Clone());
 
     public static GenerateThumbnailsBuilder Thumbnails(IFFmpegRunner? runner = null, FFmpegOptions? options = null)
-    {
-        return new GenerateThumbnailsBuilder(runner ?? DefaultRunner, options ?? GlobalOptions.Clone());
-    }
+        => new(runner ?? DefaultRunner, options ?? GlobalOptions.Clone());
 
     public static ExtractAudioBuilder ExtractAudio(IFFmpegRunner? runner = null, FFmpegOptions? options = null)
-    {
-        return new ExtractAudioBuilder(runner ?? DefaultRunner, options ?? GlobalOptions.Clone());
-    }
+        => new(runner ?? DefaultRunner, options ?? GlobalOptions.Clone());
 
     public static ClipBuilder Clip(IFFmpegRunner? runner = null, FFmpegOptions? options = null)
-    {
-        return new ClipBuilder(runner ?? DefaultRunner, options ?? GlobalOptions.Clone());
-    }
+        => new(runner ?? DefaultRunner, options ?? GlobalOptions.Clone());
 
     public static WatermarkBuilder Watermark(IFFmpegRunner? runner = null, FFmpegOptions? options = null)
-    {
-        return new WatermarkBuilder(runner ?? DefaultRunner, options ?? GlobalOptions.Clone());
-    }
+        => new(runner ?? DefaultRunner, options ?? GlobalOptions.Clone());
 
     public static ConcatBuilder Concat(IFFmpegRunner? runner = null, FFmpegOptions? options = null)
-    {
-        return new ConcatBuilder(runner ?? DefaultRunner, options ?? GlobalOptions.Clone());
-    }
+        => new(runner ?? DefaultRunner, options ?? GlobalOptions.Clone());
 
     public static FilterGraphBuilder Filters(FFmpegCommandBuilder commandBuilder)
-    {
-        return new FilterGraphBuilder(commandBuilder);
-    }
+        => new(commandBuilder);
 
     // ───────────────────────────────────────────────
-    // Utility / Advanced
+    // Low-level access
     // ───────────────────────────────────────────────
 
-    /// <summary>
-    /// Creates a fresh command builder (low-level access).
-    /// </summary>
-    public static FFmpegCommandBuilder Command(
-        FFmpegOptions? options = null)
-    {
-        return new FFmpegCommandBuilder(options ?? GlobalOptions.Clone());
-    }
+    public static FFmpegCommandBuilder Command(FFmpegOptions? options = null)
+        => new(options ?? GlobalOptions.Clone());
 
-    /// <summary>
-    /// Manually set or replace the default runner (e.g. for DI or custom locator).
-    /// </summary>
+    // ───────────────────────────────────────────────
+    // Configuration Helpers
+    // ───────────────────────────────────────────────
+
     public static void SetDefaultRunner(IFFmpegRunner runner)
     {
         _defaultRunner = runner ?? throw new ArgumentNullException(nameof(runner));
     }
 
-    /// <summary>
-    /// Set global options once (e.g. in Startup/Program.cs).
-    /// </summary>
     public static void Configure(Action<FFmpegOptions> configure)
     {
         var opts = new FFmpegOptions();
@@ -112,11 +94,14 @@ public static class FFmpeg
         GlobalOptions = opts;
     }
 
-    // Helper to get logger (fallback to null if no DI)
+    // ───────────────────────────────────────────────
+    // Private Helpers
+    // ───────────────────────────────────────────────
+
     private static ILogger<T>? GetLogger<T>()
     {
-        // In real app → resolve from IServiceProvider
-        // For now → return null (no logging by default)
+        // TODO: In real applications, resolve from DI container (IServiceProvider)
+        // For now, logging is disabled by default
         return null;
     }
 }

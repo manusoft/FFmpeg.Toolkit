@@ -8,7 +8,7 @@ namespace ManuHub.FF.NET.Parsing;
 /// </summary>
 public class FFprobeRunner
 {
-    private readonly IFFmpegRunner _ffmpegRunner; // Reuse the same runner interface
+    private readonly IFFmpegRunner _ffmpegRunner;
     private readonly FFmpegOptions _options;
 
     public FFprobeRunner(IFFmpegRunner ffmpegRunner, FFmpegOptions? options = null)
@@ -22,15 +22,20 @@ public class FFprobeRunner
         return await _ffmpegRunner.RunFFprobeAsync(
             arguments,
             _options,
-            null,
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false);
     }
 
-    // Convenience method: get JSON output (most common use case)
-    public async Task<string> GetJsonOutputAsync(string inputFile,
-                                                 string[]? extraArgs = null,
-                                                 CancellationToken ct = default)
+    /// <summary>
+    /// Most common use case: Get detailed JSON information about a media file.
+    /// </summary>
+    public async Task<string> GetJsonOutputAsync(
+        string inputFile,
+        string[]? extraArgs = null,
+        CancellationToken ct = default)
     {
+        if (string.IsNullOrWhiteSpace(inputFile))
+            throw new ArgumentException("Input file path is required", nameof(inputFile));
+
         var args = new List<string>
         {
             "-v", "quiet",
@@ -38,7 +43,8 @@ public class FFprobeRunner
             "-show_format",
             "-show_streams",
             "-show_chapters",
-            "-show_programs"
+            "-show_programs",
+            "-show_private_data"
         };
 
         if (extraArgs != null)
@@ -46,22 +52,27 @@ public class FFprobeRunner
 
         args.Add(EscapePath(inputFile));
 
-        var result = await RunAsync(args.ToArray(), ct);
+        var result = await RunAsync(args.ToArray(), ct).ConfigureAwait(false);
 
         if (!result.Success)
         {
             throw new InvalidOperationException(
-                $"ffprobe failed (exit {result.ExitCode}): {result.StandardError}");
+                $"ffprobe failed (exit code {result.ExitCode}): {result.StandardError.Trim()}");
         }
 
-        return result.StandardOutput;
+        return result.StandardOutput.Trim();
     }
 
     private static string EscapePath(string path)
     {
-        // Basic escaping for ffprobe arguments
-        if (path.Contains(" ") || path.Contains("'") || path.Contains("\""))
+        if (string.IsNullOrEmpty(path)) return path;
+
+        // Quote if contains spaces or special characters
+        if (path.Contains(' ') || path.Contains('\'') || path.Contains('"') || path.Contains('\\'))
+        {
             return $"\"{path.Replace("\"", "\\\"")}\"";
+        }
+
         return path;
     }
 }

@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/FF.NET/FF.NET.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="test/FF.NET.Console/FF.NET.Console.csproj" Id="5935db14-5b01-4845-bad3-ee29eee1ee08" />
+    <Project Path="test/FF.NET.Tests/FF.NET.Tests.csproj" />
+  </Folder>
+</Solution>

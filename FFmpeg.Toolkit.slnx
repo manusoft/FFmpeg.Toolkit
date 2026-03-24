@@ -1,9 +1,0 @@
-<Solution>
-  <Folder Name="/src/">
-    <Project Path="src/FFmpeg.Toolkit/FFmpeg.Toolkit.csproj" />
-  </Folder>
-  <Folder Name="/tests/">
-    <Project Path="test/FFmpeg.Toolkit.Console/FFmpeg.Toolkit.Console.csproj" Id="5935db14-5b01-4845-bad3-ee29eee1ee08" />
-    <Project Path="test/FFmpeg.Toolkit.Tests/FFmpeg.Toolkit.Tests.csproj" />
-  </Folder>
-</Solution>

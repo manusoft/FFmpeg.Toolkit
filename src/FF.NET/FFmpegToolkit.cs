@@ -48,7 +48,8 @@ public static class FFmpegToolkit
     // Builder Factories
     // ───────────────────────────────────────────────
 
-    public static ConvertBuilder Probe(IFFmpegRunner? runner = null, FFmpegOptions? options = null) => new(runner ?? DefaultRunner, options ?? GlobalOptions.Clone());
+    public static ProbeBuilder Probe(IFFmpegRunner? runner = null, FFmpegOptions? options = null) 
+        => new(runner ?? DefaultRunner, options ?? GlobalOptions.Clone());
 
     public static ConvertBuilder Convert(IFFmpegRunner? runner = null, FFmpegOptions? options = null)
         => new(runner ?? DefaultRunner, options ?? GlobalOptions.Clone());

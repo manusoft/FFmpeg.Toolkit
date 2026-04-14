@@ -4,6 +4,7 @@ using ManuHub.FF.NET.Models;
 using ManuHub.FF.NET.Parsing;
 using Microsoft.Extensions.Logging;
 using System.Diagnostics;
+using System.Text.Json;
 
 namespace ManuHub.FF.NET.Builders;
 
@@ -160,8 +161,8 @@ public class ConvertBuilder
         bool isMp4 = _outputPath?.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase) == true;
         if (!isMp4) return this;
 
-        var video = _probedInfo.VideoStream;
-        var audio = _probedInfo.AudioStream;
+        var video = _probedInfo.Streams?.FirstOrDefault(x => x.CodecType == "video");
+        var audio = _probedInfo.Streams?.FirstOrDefault(x => x.CodecType == "audio");
 
         bool canCopyVideo = video?.CodecName?.ToLowerInvariant() is "h264" or "avc" or "avc1"
                             && video.PixelFormat?.ToLowerInvariant() is "yuv420p" or null;
@@ -194,40 +195,7 @@ public class ConvertBuilder
         return this;
     }
 
-    // ───────────────────────────────────────────────
-    // Probe
-    // ───────────────────────────────────────────────
-    public async Task<MediaInfo> ProbeInputAsync(CancellationToken ct = default)
-    {
-        if (_inputPath is null)
-            throw new InvalidOperationException("Input must be set using .From(...) before probing.");
-
-        if (_probedInfo is not null)
-            return _probedInfo;
-
-        var ffprobeRunner = new FFprobeRunner(_runner, _options);
-
-        try
-        {
-            string json = await ffprobeRunner.GetJsonOutputAsync(_inputPath, ct: ct);
-            _probedInfo = MediaInfoParser.Parse(json);
-
-            _options.Logger?.LogInformation(
-                "Probed: {duration:F1}s | Video: {vcodec} {w}x{h} | Audio: {acodec}",
-                _probedInfo.Duration.TotalSeconds,
-                _probedInfo.VideoStream?.CodecName ?? "–",
-                _probedInfo.VideoStream?.Width ?? 0,
-                _probedInfo.VideoStream?.Height ?? 0,
-                _probedInfo.AudioStream?.CodecName ?? "–");
-
-            return _probedInfo;
-        }
-        catch (Exception ex)
-        {
-            _options.Logger?.LogWarning(ex, "Failed to probe input {Input}", _inputPath);
-            throw;
-        }
-    }
+   
 
     // ───────────────────────────────────────────────
     // Execute
@@ -246,9 +214,9 @@ public class ConvertBuilder
         {
             try
             {
-                var media = await ProbeInputAsync(ct);
-                effectiveDuration = media.Duration;
-                _knownDuration = media.Duration;   // cache it
+                var media = await ProbeAsync(ct);
+                effectiveDuration = media?.Duration;
+                _knownDuration = media?.Duration;   // cache it
             }
             catch
             {
@@ -306,4 +274,41 @@ public class ConvertBuilder
     }
 
     public string GetCommandLine() => _cmd.BuildAsString();
+
+
+    // ───────────────────────────────────────────────
+    // Probe helper
+    // ───────────────────────────────────────────────
+    private async Task<MediaInfo?> ProbeAsync(CancellationToken ct = default)
+    {
+        if (_inputPath is null)
+            throw new InvalidOperationException("Input must be set using .From(...) before probing.");
+
+        if (_probedInfo is not null)
+            return _probedInfo;
+
+        var ffprobeRunner = new FFprobeRunner(_runner, _options);
+
+        try
+        {
+            string json = await ffprobeRunner.GetJsonOutputAsync(_inputPath, ct: ct);
+            _probedInfo = JsonSerializer.Deserialize<MediaInfo>(json); 
+            if (_probedInfo == null) return null;
+
+            _options.Logger?.LogInformation(
+                "Probed: {duration:F1}s | Video: {vcodec} {w}x{h} | Audio: {acodec}",
+                _probedInfo.Duration.TotalSeconds,
+                _probedInfo.VideoStream?.CodecName ?? "–",
+                _probedInfo.VideoStream?.Width ?? 0,
+                _probedInfo.VideoStream?.Height ?? 0,
+                _probedInfo.AudioStream?.CodecName ?? "–");
+
+            return _probedInfo;
+        }
+        catch (Exception ex)
+        {
+            _options.Logger?.LogWarning(ex, "Failed to probe input {Input}", _inputPath);
+            throw;
+        }
+    }
 }

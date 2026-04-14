@@ -3,7 +3,9 @@ using ManuHub.FF.NET.Core;
 using ManuHub.FF.NET.Models;
 using ManuHub.FF.NET.Parsing;
 using ManuHub.FF.NET.Utils;
+using Microsoft.Extensions.Logging;
 using System.Diagnostics;
+using System.Text.Json;
 
 namespace ManuHub.FF.NET.Builders;
 
@@ -23,12 +25,14 @@ public class GenerateThumbnailsBuilder
     private string? _outputPattern;           // e.g. "thumb_%03d.png" or single file
     private string? _singleOutputPath;
     private MediaInfo? _probedInfo;
+
     private IProgress<FFmpegProgress>? _progress;
     private FFmpegProgress? _lastProgress;
 
     private TimeSpan? _atTime;
     private TimeSpan? _interval;
     private int? _count;
+
     private int? _tileRows;
     private int? _tileCols;
     private int _quality = 5;                 // CRF for JPG (lower = better), ignored for PNG
@@ -70,6 +74,9 @@ public class GenerateThumbnailsBuilder
     /// </summary>
     public GenerateThumbnailsBuilder OutputPattern(string pattern)
     {
+        if (!pattern.Contains("%"))
+            throw new ArgumentException("Pattern must contain %d or %03d");
+
         _outputPattern = pattern;
         _singleOutputPath = null;
         return this;
@@ -159,23 +166,6 @@ public class GenerateThumbnailsBuilder
     }
 
     // ───────────────────────────────────────────────
-    // Probe helper
-    // ───────────────────────────────────────────────
-
-    public async Task<MediaInfo> ProbeAsync(CancellationToken ct = default)
-    {
-        if (_probedInfo != null) return _probedInfo;
-
-        if (_inputPath == null)
-            throw new InvalidOperationException("Input must be set first (.From(...))");
-
-        var ffprobe = new FFprobeRunner(_runner, _options);
-        string json = await ffprobe.GetJsonOutputAsync(_inputPath, ct: ct);
-        _probedInfo = MediaInfoParser.Parse(json);
-        return _probedInfo;
-    }
-
-    // ───────────────────────────────────────────────
     // Execute
     // ───────────────────────────────────────────────
 
@@ -189,14 +179,10 @@ public class GenerateThumbnailsBuilder
 
         // Probe if not already done
         if (_probedInfo == null)
-        {
-            await ProbeAsync(ct).ConfigureAwait(false);
-        }
+            await ProbeAsync(ct);
 
         if (_probedInfo!.Duration <= TimeSpan.Zero)
-        {
             throw new InvalidOperationException("Cannot generate thumbnails: duration unknown or zero.");
-        }
 
         ConfigureCommand();
 
@@ -243,10 +229,8 @@ public class GenerateThumbnailsBuilder
     private void ConfigureCommand()
     {
         // Common settings
-        _cmd.CopyVideo();           // we only need one frame → copy is fastest
         _cmd.AddArgument("-an");    // no audio
         _cmd.AddArgument("-sn");    // no subtitles
-        _cmd.AddArgument("-frames:v", "1"); // one frame per output (except montage)
 
         // Size
         _cmd.Scale(_width, null);   // height auto
@@ -266,14 +250,17 @@ public class GenerateThumbnailsBuilder
 
         if (_atTime.HasValue)
         {
-            // Single at exact time
             _cmd.SeekInput(_atTime.Value);
-            _cmd.Output(GetSingleOrPatternPath(1));
+            _cmd.AddArgument("-frames:v", "1");
+
+            _cmd.Output(_singleOutputPath ?? ReplaceIndex(GetPatternPath(), 1));
         }
         else if (_interval.HasValue)
         {
-            // Every N seconds
-            _cmd.AddArgument("-vf", $"fps=1/{_interval.Value.TotalSeconds:F3}");
+            double fps = 1.0 / _interval.Value.TotalSeconds;
+
+            _cmd.AddArgument("-vf", $"fps={fps:F6},scale={_width}:-1");
+
             _cmd.Output(GetPatternPath());
         }
         else if (_count.HasValue)
@@ -315,32 +302,70 @@ public class GenerateThumbnailsBuilder
         }
         else
         {
-            // Default: middle frame
-            _atTime = _probedInfo!.Duration / 2;
-            _cmd.SeekInput(_atTime.Value);
-            _cmd.Output(GetSingleOrPatternPath(1));
-        }
-    }
+            // default = middle
+            var mid = _probedInfo!.Duration / 2;
 
-    private string GetSingleOrPatternPath(int index = 1)
-    {
-        if (_singleOutputPath != null) return _singleOutputPath;
-        return GetPatternPath().Replace("%d", index.ToString());
+            _cmd.SeekInput(mid);
+            _cmd.AddArgument("-frames:v", "1");
+
+            _cmd.Output(_singleOutputPath ?? ReplaceIndex(GetPatternPath(), 1));
+        }
     }
 
     private string GetPatternPath()
     {
-        if (_outputPattern != null) return _outputPattern;
+        return _outputPattern ?? Path.Combine(_options.TempDirectory, "thumb_%04d." + _format);
+    }
 
-        // Default pattern in temp folder
-        string ext = _format == "jpg" ? ".jpg" : ".png";
-        return Path.Combine(_options.TempDirectory, "thumb_%04d" + ext);
+    private static string ReplaceIndex(string pattern, int index)
+    {
+        return pattern
+            .Replace("%04d", index.ToString("D4"))
+            .Replace("%03d", index.ToString("D3"))
+            .Replace("%d", index.ToString());
     }
 
     private string? GetPrimaryOutputPath()
     {
         if (_singleOutputPath != null) return _singleOutputPath;
-        if (_outputPattern != null) return _outputPattern.Replace("%d", "0001").Replace("%03d", "001");
+        if (_outputPattern != null) return ReplaceIndex(_outputPattern, 1);
         return null;
+    }
+
+
+    // ───────────────────────────────────────────────
+    // Probe helper
+    // ───────────────────────────────────────────────
+    private async Task<MediaInfo?> ProbeAsync(CancellationToken ct = default)
+    {
+        if (_inputPath is null)
+            throw new InvalidOperationException("Input must be set using .From(...) before probing.");
+
+        if (_probedInfo is not null)
+            return _probedInfo;
+
+        var ffprobeRunner = new FFprobeRunner(_runner, _options);
+
+        try
+        {
+            string json = await ffprobeRunner.GetJsonOutputAsync(_inputPath, ct: ct);
+            _probedInfo = JsonSerializer.Deserialize<MediaInfo>(json);
+            if (_probedInfo == null) return null;
+
+            _options.Logger?.LogInformation(
+                "Probed: {duration:F1}s | Video: {vcodec} {w}x{h} | Audio: {acodec}",
+                _probedInfo.Duration.TotalSeconds,
+                _probedInfo.VideoStream?.CodecName ?? "–",
+                _probedInfo.VideoStream?.Width ?? 0,
+                _probedInfo.VideoStream?.Height ?? 0,
+                _probedInfo.AudioStream?.CodecName ?? "–");
+
+            return _probedInfo;
+        }
+        catch (Exception ex)
+        {
+            _options.Logger?.LogWarning(ex, "Failed to probe input {Input}", _inputPath);
+            throw;
+        }
     }
 }

@@ -5,13 +5,14 @@ Console.WriteLine("Hello, World!");
 
 var input = @"C:\Users\manua\Videos\Anu.mp4";
 var output = @"C:\downloads\Output_Anu.mp4";
+var temp = @"C:\downloads\temp";
 
 // Configure (use absolute paths!)
 FFmpegToolkit.Configure(opt =>
 {
     opt.FFmpegPath = @"Tools\ffmpeg.exe";   // ← full absolute path recommended
     opt.FFprobePath = @"Tools\ffprobe.exe";
-    opt.TempDirectory = Path.Combine(Path.GetTempPath(), "ManuHubFFmpeg");
+    opt.TempDirectory = temp; //Path.Combine(Path.GetTempPath(), "ManuHubFFmpeg");
 });
 
 var progress = new Progress<FFmpegProgress>(p =>
@@ -29,18 +30,44 @@ var progress = new Progress<FFmpegProgress>(p =>
     Console.WriteLine($"Progress: {percent} | Time: {timeStr} | Speed: {speedStr}x");
 });
 
-Console.WriteLine("Starting conversion...");
+//Console.WriteLine("Starting conversion...");
 
-var result = await FFmpegToolkit
-    .Convert()
-    .From(input)
-    .To(output)
-    .Scale(1280, 720)   // you had :flags=lanczos
-    .Crf(22)
+//var convertResult = await FFmpegToolkit
+//    .Convert()
+//    .From(input)
+//    .To(output)
+//    //.Scale(1280, 720)   // you had :flags=lanczos
+//    .Crf(22)
+//    .WithProgress(progress)
+//    .ExecuteAsync();
+
+//Console.WriteLine($"Success: {convertResult.Success}");
+//Console.WriteLine($"Duration: {convertResult.Duration.TotalSeconds:F1} seconds");
+//if (!convertResult.Success)
+//    Console.WriteLine($"Error: {convertResult.FailureReason}");
+
+Console.WriteLine("Starting probe info...");
+var probeResult = await FFmpegToolkit
+    .Probe()
+    .From(@"D:\Movies\Telegram Desktop\Kill (2023) HINDI.mkv")
+    .ExcecuteAsync();
+
+Console.WriteLine($"Success: {probeResult is not null}");
+
+Console.WriteLine("Starting thumbnails...");
+var result1 = await FFmpegToolkit
+    .Thumbnails()
+    .From(@"D:\Movies\Telegram Desktop\Kill (2023) HINDI.mkv")
+    //.To(@"C:\Downloads\output.jpg")
+    //.At(TimeSpan.FromMinutes(5))
+    .OutputPattern(@"C:\Downloads\frame_%0d.jpg")
+    //.Count(10)
+    //.Tile(3,3)
+    .Every(TimeSpan.FromMinutes(5))
     .WithProgress(progress)
     .ExecuteAsync();
 
-Console.WriteLine($"Success: {result.Success}");
-Console.WriteLine($"Duration: {result.Duration.TotalSeconds:F1} seconds");
-if (!result.Success)
-    Console.WriteLine($"Error: {result.FailureReason}");
+Console.WriteLine($"Success: {result1.Success}");
+Console.WriteLine($"Duration: {result1.Duration.TotalSeconds:F1} seconds");
+if (!result1.Success)
+    Console.WriteLine($"Error: {result1.FailureReason}");

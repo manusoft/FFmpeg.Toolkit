@@ -73,9 +73,6 @@ public class ProgressParser : IProgressParser
 
             if (string.IsNullOrEmpty(key)) continue;
 
-            // Optional: remove this line after testing
-            Console.WriteLine($"[DEBUG] {key} = {value}");
-
             hasMeaningfulUpdate |= UpdateField(key, value);
         }
 
@@ -92,30 +89,21 @@ public class ProgressParser : IProgressParser
         {
             case "frame":
                 if (long.TryParse(value, out long frame))
-                {
                     _current = _current with { Frame = frame };
-                    return true;
-                }
                 break;
 
             case "fps":
                 if (double.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out double fps))
-                {
                     _current = _current with { Fps = fps };
-                    return true;
-                }
                 break;
 
             case "bitrate":
                 _current = _current with { Bitrate = value };
-                return true;
+                break;
 
             case "speed":
-                if (!string.IsNullOrWhiteSpace(value))
-                {
+                if (!string.IsNullOrWhiteSpace(value) && value != "N/A")
                     _current = _current with { Speed = value };
-                    return true;
-                }
                 break;
 
             case "out_time":
@@ -129,17 +117,76 @@ public class ProgressParser : IProgressParser
                         double percent = (timeSpan.TotalSeconds / _totalDuration.Value.TotalSeconds) * 100;
                         _current = _current with { PercentComplete = Math.Clamp(percent, 0, 100) };
                     }
-                    return true;
                 }
                 break;
 
             case "progress":
                 _current = _current with { Status = value.Trim() };
+
+                // 🔥 ONLY REPORT HERE
+                if (_progressSink != null)
+                    _progressSink.Report(_current);
+
                 return true;
         }
 
         return false;
     }
+
+    //private bool UpdateField(string key, string value)
+    //{
+    //    switch (key.ToLowerInvariant())
+    //    {
+    //        case "frame":
+    //            if (long.TryParse(value, out long frame))
+    //            {
+    //                _current = _current with { Frame = frame };
+    //                return true;
+    //            }
+    //            break;
+
+    //        case "fps":
+    //            if (double.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out double fps))
+    //            {
+    //                _current = _current with { Fps = fps };
+    //                return true;
+    //            }
+    //            break;
+
+    //        case "bitrate":
+    //            _current = _current with { Bitrate = value };
+    //            return true;
+
+    //        case "speed":
+    //            if (!string.IsNullOrWhiteSpace(value))
+    //            {
+    //                _current = _current with { Speed = value };
+    //                return true;
+    //            }
+    //            break;
+
+    //        case "out_time":
+    //        case "time":
+    //            if (TryParseFfmpegTime(value, out var timeSpan))
+    //            {
+    //                _current = _current with { Time = timeSpan };
+
+    //                if (_totalDuration.HasValue && _totalDuration.Value > TimeSpan.Zero)
+    //                {
+    //                    double percent = (timeSpan.TotalSeconds / _totalDuration.Value.TotalSeconds) * 100;
+    //                    _current = _current with { PercentComplete = Math.Clamp(percent, 0, 100) };
+    //                }
+    //                return true;
+    //            }
+    //            break;
+
+    //        case "progress":
+    //            _current = _current with { Status = value.Trim() };
+    //            return true;
+    //    }
+
+    //    return false;
+    //}
 
     private static bool TryParseFfmpegTime(string timeStr, out TimeSpan result)
     {

@@ -222,16 +222,16 @@ public class ConcatBuilder
         var first = _inputs[0].Probed;
         if (first == null) return false;
 
-        string? firstVCodec = first.VideoStream?.CodecName?.ToLowerInvariant();
-        string? firstACodec = first.AudioStream?.CodecName?.ToLowerInvariant();
+        string? firstVCodec = first.Streams?.FirstOrDefault(x => x.CodecType == "video")?.CodecName?.ToLowerInvariant();
+        string? firstACodec = first.Streams?.FirstOrDefault(x => x.CodecType == "audio")?.CodecName?.ToLowerInvariant();
 
         foreach (var input in _inputs.Skip(1))
         {
             var probed = input.Probed;
             if (probed == null) return false;
 
-            if (probed.VideoStream?.CodecName?.ToLowerInvariant() != firstVCodec ||
-                probed.AudioStream?.CodecName?.ToLowerInvariant() != firstACodec)
+            if (probed.Streams?.FirstOrDefault(x => x.CodecType == "video")?.CodecName?.ToLowerInvariant() != firstVCodec ||
+                probed.Streams?.FirstOrDefault(x => x.CodecType == "audio")?.CodecName?.ToLowerInvariant() != firstACodec)
             {
                 return false;
             }

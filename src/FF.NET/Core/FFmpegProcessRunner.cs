@@ -2,6 +2,7 @@
 using ManuHub.FF.NET.Parsing;
 using Microsoft.Extensions.Logging;
 using System.Diagnostics;
+using System.Globalization;
 using System.Text;
 
 namespace ManuHub.FF.NET.Core;
@@ -150,5 +151,28 @@ public class FFmpegProcessRunner : IFFmpegRunner
         {
             process.Dispose();
         }
+    }
+
+    public async Task<TimeSpan?> GetDurationAsync(string input, FFmpegOptions options, CancellationToken ct)
+    {
+        var args = new[]
+        {
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        input
+    };
+
+        var result = await RunFFprobeAsync(args, options, ct);
+
+        if (double.TryParse(result.StandardOutput.Trim(),
+                            NumberStyles.Any,
+                            CultureInfo.InvariantCulture,
+                            out double seconds))
+        {
+            return TimeSpan.FromSeconds(seconds);
+        }
+
+        return null;
     }
 }

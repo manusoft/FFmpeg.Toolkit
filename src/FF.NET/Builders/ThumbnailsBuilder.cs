@@ -14,32 +14,39 @@ namespace ManuHub.FF.NET.Builders;
 /// Supports single timestamp, regular intervals, evenly distributed thumbnails,
 /// and optional tile/montage output.
 /// </summary>
-public class GenerateThumbnailsBuilder
+public class ThumbnailsBuilder
 {
     private readonly IFFmpegRunner _runner;
     private readonly FFmpegOptions _options;
     private readonly FFmpegCommandBuilder _cmd;
     private readonly TempFileManager _tempManager;
 
-    private string? _inputPath;
-    private string? _outputPattern;           // e.g. "thumb_%03d.png" or single file
-    private string? _singleOutputPath;
+    private string? _input;
+    private string? _pattern;
+    private string? _single;
+
     private MediaInfo? _probedInfo;
 
     private IProgress<FFmpegProgress>? _progress;
     private FFmpegProgress? _lastProgress;
 
-    private TimeSpan? _atTime;
+    private TimeSpan? _at;
     private TimeSpan? _interval;
     private int? _count;
 
+    private bool _sceneMode;
+    private double _sceneThreshold = 0.4;
+
+    private bool _keyframesOnly;
+
     private int? _tileRows;
     private int? _tileCols;
-    private int _quality = 5;                 // CRF for JPG (lower = better), ignored for PNG
-    private string _format = "png";           // png or jpg
-    private int _width = 320;                 // thumbnail width (height auto)
 
-    public GenerateThumbnailsBuilder(IFFmpegRunner runner, FFmpegOptions? options = null)
+    private int _width = 320;
+    private string _format = "jpg";
+    private int _quality = 5;
+
+    public ThumbnailsBuilder(IFFmpegRunner runner, FFmpegOptions? options = null)
     {
         _runner = runner ?? throw new ArgumentNullException(nameof(runner));
         _options = options?.Clone() ?? new FFmpegOptions();
@@ -51,9 +58,9 @@ public class GenerateThumbnailsBuilder
     // Input / Output
     // ───────────────────────────────────────────────
 
-    public GenerateThumbnailsBuilder From(string inputPath)
+    public ThumbnailsBuilder From(string inputPath)
     {
-        _inputPath = inputPath ?? throw new ArgumentNullException(nameof(inputPath));
+        _input = inputPath ?? throw new ArgumentNullException(nameof(inputPath));
         _cmd.Input(inputPath);
         return this;
     }
@@ -61,10 +68,10 @@ public class GenerateThumbnailsBuilder
     /// <summary>
     /// Extract a single thumbnail and save it to this exact path.
     /// </summary>
-    public GenerateThumbnailsBuilder To(string outputPath)
+    public ThumbnailsBuilder To(string outputPath)
     {
-        _singleOutputPath = outputPath;
-        _outputPattern = null;
+        _single = outputPath;
+        _pattern = null;
         return this;
     }
 
@@ -72,13 +79,13 @@ public class GenerateThumbnailsBuilder
     /// Pattern for multiple thumbnails (must contain %d or %03d etc.)
     /// Example: "thumbs/frame_%04d.jpg"
     /// </summary>
-    public GenerateThumbnailsBuilder OutputPattern(string pattern)
+    public ThumbnailsBuilder OutputPattern(string pattern)
     {
         if (!pattern.Contains("%"))
             throw new ArgumentException("Pattern must contain %d or %03d");
 
-        _outputPattern = pattern;
-        _singleOutputPath = null;
+        _pattern = pattern;
+        _single = null;
         return this;
     }
 
@@ -89,58 +96,46 @@ public class GenerateThumbnailsBuilder
     /// <summary>
     /// Extract thumbnail at exact timestamp
     /// </summary>
-    public GenerateThumbnailsBuilder At(TimeSpan time)
+    public ThumbnailsBuilder At(TimeSpan time)
     {
-        _atTime = time;
-        _interval = null;
-        _count = null;
+        ResetModes();
+        _at = time;
         return this;
     }
 
     /// <summary>
     /// Extract thumbnails every N seconds
     /// </summary>
-    public GenerateThumbnailsBuilder Every(TimeSpan interval)
+    public ThumbnailsBuilder Every(TimeSpan interval)
     {
+        ResetModes();
         _interval = interval;
-        _atTime = null;
-        _count = null;
         return this;
     }
 
     /// <summary>
     /// Extract exactly N thumbnails evenly distributed across the video
     /// </summary>
-    public GenerateThumbnailsBuilder Count(int numberOfThumbnails)
+    public ThumbnailsBuilder Count(int numberOfThumbnails)
     {
         if (numberOfThumbnails < 1) throw new ArgumentOutOfRangeException(nameof(numberOfThumbnails));
+
+        ResetModes();
         _count = numberOfThumbnails;
-        _atTime = null;
-        _interval = null;
         return this;
     }
 
-    // ───────────────────────────────────────────────
-    // Appearance / Quality
-    // ───────────────────────────────────────────────
-
-    public GenerateThumbnailsBuilder Width(int pixels)
+    public ThumbnailsBuilder Scene(double threshold = 0.4)
     {
-        _width = Math.Max(64, pixels);
+        ResetModes();
+        _sceneMode = true;
+        _sceneThreshold = threshold;
         return this;
     }
 
-    public GenerateThumbnailsBuilder Format(string format) // "png" or "jpg"
+    public ThumbnailsBuilder KeyframesOnly()
     {
-        var f = format.ToLowerInvariant();
-        if (f is not ("png" or "jpg" or "jpeg")) throw new ArgumentException("Supported: png, jpg");
-        _format = f;
-        return this;
-    }
-
-    public GenerateThumbnailsBuilder Quality(int quality) // 2–31 for jpg (lower=better), ignored for png
-    {
-        _quality = Math.Clamp(quality, 2, 31);
+        _keyframesOnly = true;
         return this;
     }
 
@@ -148,18 +143,50 @@ public class GenerateThumbnailsBuilder
     // Montage / Tile output (all thumbs in one image)
     // ───────────────────────────────────────────────
 
-    public GenerateThumbnailsBuilder Tile(int rows, int columns)
+    public ThumbnailsBuilder Tile(int rows, int columns)
     {
         _tileRows = rows;
         _tileCols = columns;
         return this;
     }
 
+    private void ResetModes()
+    {
+        _at = null;
+        _interval = null;
+        _count = null;
+        _sceneMode = false;
+    }
+
+
+    // ───────────────────────────────────────────────
+    // Appearance / Quality
+    // ───────────────────────────────────────────────
+
+    public ThumbnailsBuilder Width(int pixels)
+    {
+        _width = Math.Max(64, pixels);
+        return this;
+    }
+
+    public ThumbnailsBuilder Format(string format) // "png" or "jpg"
+    {
+        var f = format.ToLowerInvariant();
+        if (f is not ("png" or "jpg" or "jpeg")) throw new ArgumentException("Supported: png, jpg");
+        _format = f;
+        return this;
+    }
+
+    public ThumbnailsBuilder Quality(int quality) // 2–31 for jpg (lower=better), ignored for png
+    {
+        _quality = Math.Clamp(quality, 2, 31);
+        return this;
+    }
+       
     // ───────────────────────────────────────────────
     // Progress
     // ───────────────────────────────────────────────
-
-    public GenerateThumbnailsBuilder WithProgress(IProgress<FFmpegProgress> progress)
+    public ThumbnailsBuilder WithProgress(IProgress<FFmpegProgress> progress)
     {
         _progress = progress;
         return this;
@@ -168,13 +195,12 @@ public class GenerateThumbnailsBuilder
     // ───────────────────────────────────────────────
     // Execute
     // ───────────────────────────────────────────────
-
     public async Task<FFmpegResult> ExecuteAsync(CancellationToken ct = default)
     {
-        if (_inputPath == null)
+        if (_input == null)
             throw new InvalidOperationException("Input required (.From(...))");
 
-        if (_singleOutputPath == null && _outputPattern == null)
+        if (_single == null && _pattern == null)
             throw new InvalidOperationException("Output required (.To(...) or .OutputPattern(...))");
 
         // Probe if not already done
@@ -228,119 +254,100 @@ public class GenerateThumbnailsBuilder
 
     private void ConfigureCommand()
     {
-        // Common settings
-        _cmd.AddArgument("-an");    // no audio
-        _cmd.AddArgument("-sn");    // no subtitles
+        _cmd.AddArgument("-an");
+        _cmd.AddArgument("-sn");
 
-        // Size
-        _cmd.Scale(_width, null);   // height auto
+        var filters = new List<string>();
 
-        // Quality / format
-        if (_format == "jpg")
-        {
-            _cmd.VideoCodec("mjpeg");
-            _cmd.Crf(_quality);
-        }
-        else
-        {
-            _cmd.VideoCodec("png");
-        }
+        // ───── MODE FILTERS ─────
 
-        // ── Extraction mode ────────────────────────────────────────
-
-        if (_atTime.HasValue)
-        {
-            _cmd.SeekInput(_atTime.Value);
-            _cmd.AddArgument("-frames:v", "1");
-
-            _cmd.Output(_singleOutputPath ?? ReplaceIndex(GetPatternPath(), 1));
-        }
-        else if (_interval.HasValue)
+        if (_interval.HasValue)
         {
             double fps = 1.0 / _interval.Value.TotalSeconds;
-
-            _cmd.AddArgument("-vf", $"fps={fps:F6},scale={_width}:-1");
-
-            _cmd.Output(GetPatternPath());
+            filters.Add($"fps={fps:F6}");
         }
         else if (_count.HasValue)
         {
-            // Evenly distributed
-            double totalSec = _probedInfo!.Duration.TotalSeconds;
-            double step = totalSec / (_count.Value + 1); // avoid start & very end
+            double fps = _count.Value / _probedInfo!.Duration.TotalSeconds;
+            filters.Add($"fps={fps:F6}");
+        }
+        else if (_sceneMode)
+        {
+            filters.Add($"select='gt(scene,{_sceneThreshold})'");
+        }
 
-            var times = Enumerable.Range(1, _count.Value)
-                .Select(i => TimeSpan.FromSeconds(i * step));
+        if (_keyframesOnly)
+        {
+            filters.Add("select='eq(pict_type,I)'");
+        }
 
-            if (_tileRows.HasValue && _tileCols.HasValue)
-            {
-                // Montage mode: generate all then tile in one command
-                var filterParts = new List<string>();
+        // scale always last
+        filters.Add($"scale={_width}:-1");
 
-                for (int i = 0; i < _count.Value; i++)
-                {
-                    var t = times.ElementAt(i);
-                    filterParts.Add($"[0:v]trim=start={t.TotalSeconds:F3},setpts=PTS-STARTPTS,scale={_width}:-1[s{i}];");
-                }
+        // ───── TILE ─────
 
-                var overlayChain = string.Join("", Enumerable.Range(0, _count.Value).Select(i => $"[s{i}]"));
-                int cols = _tileCols.Value;
-                int rows = _tileRows.Value;
+        if (_tileRows.HasValue && _tileCols.HasValue)
+        {
+            filters.Add($"tile={_tileCols}x{_tileRows}");
+            _cmd.AddArgument("-frames:v", "1");
+        }
 
-                filterParts.Add($"{overlayChain}tile={cols}x{rows}[out]");
+        // apply filters
+        _cmd.AddArgument("-vf", string.Join(",", filters));
 
-                _cmd.AddArgument("-filter_complex", string.Join("", filterParts));
-                _cmd.AddArgument("-map", "[out]");
-                _cmd.Output(_singleOutputPath ?? _tempManager.CreateTempFile("." + _format));
-            }
-            else
-            {
-                // Multiple separate files
-                _cmd.AddArgument("-vf", string.Join(",", times.Select(t => $"select=eq(n\\,0)+gte(t\\,{t.TotalSeconds:F3})")));
-                _cmd.Output(GetPatternPath());
-            }
+        // codec
+        if (_format is "jpg" or "jpeg")
+        {
+            _cmd.AddArgument("-c:v", "mjpeg");
+            _cmd.AddArgument("-q:v", _quality.ToString());
         }
         else
         {
-            // default = middle
-            var mid = _probedInfo!.Duration / 2;
+            _cmd.AddArgument("-c:v", "png");
+        }
 
-            _cmd.SeekInput(mid);
+        // ───── SINGLE MODE ─────
+
+        if (_at.HasValue)
+        {
+            _cmd.SeekInput(_at.Value);
             _cmd.AddArgument("-frames:v", "1");
+            _cmd.Output(_single ?? Replace(_pattern!, 1));
+            return;
+        }
 
-            _cmd.Output(_singleOutputPath ?? ReplaceIndex(GetPatternPath(), 1));
+        // ───── OUTPUT ─────
+
+        if (_tileRows.HasValue)
+        {
+            _cmd.Output(_single ?? Path.Combine(_options.TempDirectory, "tile." + _format));
+        }
+        else
+        {
+            _cmd.Output(_pattern!);
         }
     }
 
-    private string GetPatternPath()
+    // ───────── HELPERS ─────────
+    private static string Replace(string pattern, int i)
     {
-        return _outputPattern ?? Path.Combine(_options.TempDirectory, "thumb_%04d." + _format);
-    }
-
-    private static string ReplaceIndex(string pattern, int index)
-    {
-        return pattern
-            .Replace("%04d", index.ToString("D4"))
-            .Replace("%03d", index.ToString("D3"))
-            .Replace("%d", index.ToString());
+        return pattern.Replace("%04d", i.ToString("D4"))
+                      .Replace("%03d", i.ToString("D3"))
+                      .Replace("%d", i.ToString());
     }
 
     private string? GetPrimaryOutputPath()
     {
-        if (_singleOutputPath != null) return _singleOutputPath;
-        if (_outputPattern != null) return ReplaceIndex(_outputPattern, 1);
+        if (_single != null) return _single;
+        if (_pattern != null) return Replace(_pattern, 1);
         return null;
     }
-
 
     // ───────────────────────────────────────────────
     // Probe helper
     // ───────────────────────────────────────────────
     private async Task<MediaInfo?> ProbeAsync(CancellationToken ct = default)
     {
-        if (_inputPath is null)
-            throw new InvalidOperationException("Input must be set using .From(...) before probing.");
-
         if (_probedInfo is not null)
             return _probedInfo;
 
@@ -348,7 +355,7 @@ public class GenerateThumbnailsBuilder
 
         try
         {
-            string json = await ffprobeRunner.GetJsonOutputAsync(_inputPath, ct: ct);
+            string json = await ffprobeRunner.GetJsonOutputAsync(_input, ct: ct);
             _probedInfo = JsonSerializer.Deserialize<MediaInfo>(json);
             if (_probedInfo == null) return null;
 
@@ -364,7 +371,7 @@ public class GenerateThumbnailsBuilder
         }
         catch (Exception ex)
         {
-            _options.Logger?.LogWarning(ex, "Failed to probe input {Input}", _inputPath);
+            _options.Logger?.LogWarning(ex, "Failed to probe input {Input}", _input);
             throw;
         }
     }

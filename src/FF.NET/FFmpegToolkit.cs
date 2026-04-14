@@ -54,7 +54,7 @@ public static class FFmpegToolkit
     public static ConvertBuilder Convert(IFFmpegRunner? runner = null, FFmpegOptions? options = null)
         => new(runner ?? DefaultRunner, options ?? GlobalOptions.Clone());
 
-    public static GenerateThumbnailsBuilder Thumbnails(IFFmpegRunner? runner = null, FFmpegOptions? options = null)
+    public static ThumbnailsBuilder Thumbnails(IFFmpegRunner? runner = null, FFmpegOptions? options = null)
         => new(runner ?? DefaultRunner, options ?? GlobalOptions.Clone());
 
     public static ExtractAudioBuilder ExtractAudio(IFFmpegRunner? runner = null, FFmpegOptions? options = null)

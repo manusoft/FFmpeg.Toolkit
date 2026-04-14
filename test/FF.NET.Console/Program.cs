@@ -58,12 +58,10 @@ Console.WriteLine("Starting thumbnails...");
 var result1 = await FFmpegToolkit
     .Thumbnails()
     .From(@"D:\Movies\Telegram Desktop\Kill (2023) HINDI.mkv")
-    //.To(@"C:\Downloads\output.jpg")
-    //.At(TimeSpan.FromMinutes(5))
-    .OutputPattern(@"C:\Downloads\frame_%0d.jpg")
-    //.Count(10)
-    //.Tile(3,3)
-    .Every(TimeSpan.FromMinutes(5))
+
+    //.Every(TimeSpan.FromMinutes(5)) // Every 5 minutes
+    //.KeyframesOnly()
+    //.OutputPattern(@"C:\downloads\frame_%04d.jpg") 
     .WithProgress(progress)
     .ExecuteAsync();
 
